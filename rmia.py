@@ -1,34 +1,14 @@
-"""
-Membership Inference Attack — Continuous RMIA (Offline) 
-Fully Augmented Reference Models + Float64 Stable Confidence
-"""
-import sys, time, argparse, csv
-import torch, numpy as np
-from pathlib import Path
-from torch.utils.data import Dataset, DataLoader, Subset
-from torchvision.models import resnet18
-import torchvision.transforms as transforms
-import torch.nn as nn
-import torch.optim as optim
-import os
-import sys
+import time
+import numpy as np
 import torch
 import pandas as pd
-import requests
-import random
-import argparse
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
-import torch.nn.functional as F
-import sys, time, argparse
-import torch, numpy as np, pandas as pd, requests
+
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader, Subset
 from torchvision.models import resnet18
 import torchvision.transforms as transforms
 import torch.nn as nn
 import torch.optim as optim
-
 # ─── Configuration ─────────────────────────────────────────────────────────────
 PATH = Path(__file__).parent
 PUB_PATH   = PATH / "pub.pt"
@@ -38,86 +18,16 @@ OUTPUT_CSV = PATH / "submission.csv"
 REF_DIR    = PATH / "ref_models"
 
 
-# dataset classes
-class TaskDataset(Dataset):
-    def __init__(self, transform=None):
-        self.ids = []
-        self.imgs = []
-        self.labels = []
-        self.transform = transform
-
-    def __getitem__(self, index):
-        id_ = self.ids[index]
-        img = self.imgs[index]
-        if self.transform is not None:
-            img = self.transform(img)
-        label = self.labels[index]
-        return id_, img, label
-
-    def __len__(self):
-        return len(self.ids)
-
-
-class MembershipDataset(TaskDataset):
-    def __init__(self, transform=None):
-        super().__init__(transform)
-        self.membership = []
-
-    def __getitem__(self, index):
-        id_, img, label = super().__getitem__(index)
-        return id_, img, label, self.membership[index]
-
-
-# load datasets
-print("Loading datasets...")
-pub_ds = torch.load(PUB_PATH, weights_only=False)
-priv_ds = torch.load(PRIV_PATH, weights_only=False)
-
-
-# normalization (same as training)
-MEAN = [0.7406, 0.5331, 0.7059]
-STD = [0.1491, 0.1864, 0.1301]
-
-transform = transforms.Compose([
-    transforms.Resize(32),
-    transforms.Normalize(mean=MEAN, std=STD),
-])
-
-pub_ds.transform = transform
-priv_ds.transform = transform
-
-
-# load model
-print("Loading model...")
-model = resnet18(weights=None)
-model.conv1 = torch.nn.Conv2d(3, 64, 3, 1, 1, bias=False)
-model.maxpool = torch.nn.Identity()
-model.fc = torch.nn.Linear(512, 9)
-
-model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu"))
-model.eval()
-
-if hasattr(priv_ds, 'membership'):
-    priv_ds.membership = [-1 if m is None else m for m in priv_ds.membership]
-
-# The DataLoaders will automatically use the __getitem__ from your dataset classes
-pub_loader = DataLoader(pub_ds, batch_size=256, shuffle=False)
-priv_loader = DataLoader(priv_ds, batch_size=256, shuffle=False)
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = model.to(device)
-
-
 # Hyperparameters ───────────────────────────────────────────────────────────
 NUM_CLASSES    = 9
 NUM_REF_MODELS = 4    # OUT reference models to train (more → better, slower)
 REF_EPOCHS     = 60     # epochs per reference model
-GAMMA          = 1.0    # pairwise LR threshold γ (paper §3, Fig.7 → γ=2 best)
+GAMMA          = 2.0    # pairwise LR threshold γ (paper §3, Fig.7 → γ=2 best)
 A_PARAM        = 0.3    # offline Pr(x) correction 'a' (paper App.B.2.2; 0.3 CIFAR)
 BATCH_SIZE     = 256
 USE_AUG        = False   # 6-view augmentation for confidence estimates
 
-# SM-Taylor-Softmax hyperparams (paper Table 6, CIFAR-like models)
+# SM-Taylor-Softmax hyperparams (empirically chosen)
 SMT_N, SMT_M, SMT_T = 4, 0.6, 2.0
 
 MEAN = [0.7406, 0.5331, 0.7059]
@@ -172,13 +82,7 @@ def build_model():
 
 # ─── SM-Taylor-Softmax Confidence ─────────────────────────────────────────────
 def smt_conf(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """
-    Soft-Margin Taylor-Softmax (paper App. B.2.1, eq. 7).
-    Returns confidence of the true class for each sample in the batch.
-
-    Compared to plain Softmax, this gives slightly higher TPR at low FPR
-    (paper Table 6: AUC improves from 68.96 → 69.15).
-    """
+    
     logits = logits / SMT_T
     B, dev = logits.shape[0], logits.device
     idx    = torch.arange(B, device=dev)
@@ -372,11 +276,9 @@ priv_ds = torch.load(PRIV_PATH, weights_only=False)
 pub_ds.transform  = NORM
 priv_ds.transform = NORM
 
-# Wrappers that always yield (id, img, label)
 pub_plain  = Strip(pub_ds)
 priv_plain = Strip(priv_ds)
 
-# Z = non-members of pub.pt (clean population samples — NOT used in training)
 m_idx  = [i for i in range(len(pub_ds)) if pub_ds.membership[i] == 1]
 nm_idx = [i for i in range(len(pub_ds)) if pub_ds.membership[i] == 0]
 split_point = len(nm_idx) // 2
@@ -398,7 +300,7 @@ target.eval()
 
 
 
-# ── Baseline: confidence attack (Attack-P + SM-Taylor + augmentation) ──────
+# ── Baseline: confidence attack  ──────
 print("\n[3/4] Baseline confidence scores ...")
 t0 = time.time()
 pub_conf  = get_conf(target, pub_plain,  augment=USE_AUG)
@@ -411,7 +313,7 @@ print(f"  SM-Taylor confidence  TPR@5%%FPR = {bl_score:.4f}  "
 print(f"\n[4/4] Reference models ({NUM_REF_MODELS} OUT models × {REF_EPOCHS} epochs) ...")
 refs = []
 train_masks = []
-np.random.seed(42)      # reproducible subset splits
+np.random.seed(42)      
 
 for k in range(NUM_REF_MODELS):
     ckpt = REF_DIR / f"ref_{k}_ep{REF_EPOCHS}.pt"

@@ -1,8 +1,7 @@
 #!/bin/bash
 
-# 1. Install missing dependencies inside the container
-# We use -q to keep the logs clean and --no-cache-dir to save space
-/opt/conda/bin/python -m pip install --no-cache-dir scikit-learn pandas requests scipy
+# Install only what is needed
+/opt/conda/bin/python -m pip install --no-cache-dir pandas
 
-# 2. Run your classifier
-/opt/conda/bin/python -u meta_classifier.py
+# Run attack
+/opt/conda/bin/python -u rmia.py
